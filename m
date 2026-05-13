@@ -1,889 +1,1181 @@
-; ============================================================
-;  PONG VGA - Assembly 8086 cho EMU8086
-;  VGA Mode 13h: 320x200, 256 mau, VRAM tai A000:0000
-;  Tac gia: Claude Sonnet 4.6
-; ============================================================
+ORG 100H
+
+; ==============================================================
+; GAME CARO NANG CAP - Assembly 8086
+; Chon ban co: 3x3 / 5x5 / 10x10
+; Che do: 2 nguoi choi | Danh voi may (AI)
+; Giao dien mau sac dung INT 10H
+; Chay tren EMU8086 va DOSBox (.COM file)
 ;
-;  DIEU KHIEN:
-;    W / S  -> Di chuyen paddle TRAI len/xuong
-;    O / L  -> Di chuyen paddle PHAI len/xuong
-;    ESC    -> Thoat game
+; CACH CHAY:
+;   EMU8086: Mo file -> Compile -> Run
+;   DOSBox:  nasm caro_game.asm -o caro_game.com
+;            caro_game.com
 ;
-;  KY THUAT:
-;    - INT 10H / AL=13H  : Chuyen sang VGA Mode 13h
-;    - MOV ES, 0A000H    : Tro ES thang vao VRAM
-;    - STOSB / MOV [ES:BX]: Ghi pixel truc tiep - SIEU NHANH
-;    - Double buffering don gian (xoa->ve)
-; ============================================================
+; LUAT CHOI:
+;   Ban 3x3: thang 3 o lien tiep
+;   Ban 5x5: thang 3 o lien tiep
+;   Ban 10x10: thang 5 o lien tiep
+;   Nhap so hang va so cot (tu 0 den SIZE-1)
+; ==============================================================
 
-.model small
-.stack 200h
-
-.data
-    ; ---- Trang thai qua bong ----
-    ball_x      dw  160      ; Vi tri X qua bong (giua man hinh)
-    ball_y      dw  100      ; Vi tri Y qua bong
-    ball_dx     dw  2        ; Toc do X (+2 hoac -2)
-    ball_dy     dw  1        ; Toc do Y (+1 hoac -1)
-    ball_size   dw  4        ; Kich thuoc qua bong (4x4 pixel)
-
-    ; ---- Paddle TRAI (Player 1: W/S) ----
-    pad1_x      dw  8        ; Vi tri X paddle trai
-    pad1_y      dw  76       ; Vi tri Y paddle trai (giua doc)
-    pad1_h      dw  48       ; Chieu cao paddle
-    pad1_w      dw  6        ; Chieu rong paddle
-    pad1_score  dw  0        ; Diem nguoi choi 1
-
-    ; ---- Paddle PHAI (Player 2: O/L) ----
-    pad2_x      dw  306      ; Vi tri X paddle phai (320-8-6)
-    pad2_y      dw  76       ; Vi tri Y paddle phai
-    pad2_h      dw  48       ; Chieu cao paddle
-    pad2_w      dw  6        ; Chieu rong paddle
-    pad2_score  dw  0        ; Diem nguoi choi 2
-
-    ; ---- Hang so man hinh ----
-    SCREEN_W    equ 320
-    SCREEN_H    equ 200
-
-    ; ---- Hang so mau sac (VGA Palette mac dinh) ----
-    CLR_BLACK   equ 0        ; Den
-    CLR_WHITE   equ 15       ; Trang sang
-    CLR_CYAN    equ 11       ; Xanh lam sang (qua bong)
-    CLR_GREEN   equ 10       ; Xanh la sang (paddle trai)
-    CLR_RED     equ 12       ; Do sang (paddle phai)
-    CLR_YELLOW  equ 14       ; Vang (duong giua)
-    CLR_GRAY    equ 8        ; Xam (vien)
-
-    ; ---- Bien phu ----
-    game_over   db  0        ; Co game over
-    winner      db  0        ; 1=P1 thang, 2=P2 thang
-    frame_count dw  0        ; Dem frame (de delay)
-
-.code
-main proc
-    ; ---- Khoi tao Data Segment ----
-    mov  ax, @data
-    mov  ds, ax
-
-    ; ---- Chuyen sang VGA Mode 13h ----
-    ; INT 10H: AH=00H, AL=13H -> 320x200, 256 mau
-    mov  ax, 0013h
-    int  10h
-
-    ; ---- Tro ES vao VRAM A000:0000 ----
-    ; Day la KHAI BAO QUAN TRONG NHAT:
-    ; Moi byte trong vung nho A000:0000..A000:F9FF
-    ; tuong ung 1 pixel tren man hinh
-    ; pixel(x,y) = ES:[y*320 + x]
-    mov  ax, 0A000h
-    mov  es, ax
-
-    ; ---- Ve man hinh khoi dong ----
-    call clear_screen
-    call draw_border
-    call draw_center_line
-
-game_loop:
-    ; ---- Kiem tra phim bam (khong blocking) ----
-    call handle_input
-
-    ; ---- Kiem tra game over ----
-    cmp  [game_over], 1
-    je   game_end
-
-    ; ---- Cap nhat logic qua bong ----
-    call update_ball
-
-    ; ---- Ve lai man hinh ----
-    call render_frame
-
-    ; ---- Delay nho de kiem soat toc do ----
-    call delay_frame
-
-    jmp  game_loop
-
-game_end:
-    call show_winner
-    ; Doi phim bat ky
-    mov  ah, 00h
-    int  16h
-
-    ; ---- Phuc hoi Text Mode ----
-    mov  ax, 0003h
-    int  10h
-
-    ; ---- Thoat chuong trinh ----
-    mov  ax, 4C00h
-    int  21h
-main endp
+JMP START
 
 ; ============================================================
-;  XU LY INPUT - Kiem tra phim khong blocking
-; ============================================================
-handle_input proc
-    ; Kiem tra co phim nao duoc nhan khong
-    mov  ah, 01h
-    int  16h
-    jz   input_done      ; ZF=1 neu khong co phim -> bo qua
-
-    ; Co phim -> doc phim
-    mov  ah, 00h
-    int  16h
-    ; AL = ASCII code
-
-    ; ---- ESC -> Thoat ----
-    cmp  al, 27
-    je   quit_game
-
-    ; ---- W -> Paddle trai di len ----
-    cmp  al, 'w'
-    je   pad1_up
-    cmp  al, 'W'
-    je   pad1_up
-
-    ; ---- S -> Paddle trai di xuong ----
-    cmp  al, 's'
-    je   pad1_down
-    cmp  al, 'S'
-    je   pad1_down
-
-    ; ---- O -> Paddle phai di len ----
-    cmp  al, 'o'
-    je   pad2_up
-    cmp  al, 'O'
-    je   pad2_up
-
-    ; ---- L -> Paddle phai di xuong ----
-    cmp  al, 'l'
-    je   pad2_down
-    cmp  al, 'L'
-    je   pad2_down
-
-    jmp  input_done
-
-pad1_up:
-    cmp  [pad1_y], 2       ; Kiem tra bien tren (+ vien)
-    jle  input_done
-    sub  [pad1_y], 3       ; Di len 3 pixel
-    jmp  input_done
-
-pad1_down:
-    mov  ax, [pad1_y]
-    add  ax, [pad1_h]
-    cmp  ax, SCREEN_H-2    ; Kiem tra bien duoi
-    jge  input_done
-    add  [pad1_y], 3       ; Di xuong 3 pixel
-    jmp  input_done
-
-pad2_up:
-    cmp  [pad2_y], 2
-    jle  input_done
-    sub  [pad2_y], 3
-    jmp  input_done
-
-pad2_down:
-    mov  ax, [pad2_y]
-    add  ax, [pad2_h]
-    cmp  ax, SCREEN_H-2
-    jge  input_done
-    add  [pad2_y], 3
-    jmp  input_done
-
-quit_game:
-    mov  ax, 0003h         ; Phuc hoi text mode truoc khi thoat
-    int  10h
-    mov  ax, 4C00h
-    int  21h
-
-input_done:
-    ret
-handle_input endp
-
-; ============================================================
-;  CAP NHAT LOGIC QUA BONG
-; ============================================================
-update_ball proc
-    ; ---- Di chuyen qua bong ----
-    mov  ax, [ball_dx]
-    add  [ball_x], ax
-    mov  ax, [ball_dy]
-    add  [ball_y], ax
-
-    ; ---- Kiem tra bien TREN (y <= 1) ----
-    cmp  [ball_y], 1
-    jg   check_bottom
-    mov  [ball_y], 1
-    neg  [ball_dy]         ; Doi huong Y
-
-check_bottom:
-    ; ---- Kiem tra bien DUOI (y+size >= 199) ----
-    mov  ax, [ball_y]
-    add  ax, [ball_size]
-    cmp  ax, SCREEN_H-1
-    jl   check_paddles
-    mov  ax, SCREEN_H-1
-    sub  ax, [ball_size]
-    mov  [ball_y], ax
-    neg  [ball_dy]
-
-check_paddles:
-    ; ---- Va cham Paddle TRAI ----
-    ; Kiem tra: ball_x <= pad1_x + pad1_w
-    ;           ball_y+size >= pad1_y
-    ;           ball_y <= pad1_y + pad1_h
-    mov  ax, [ball_x]
-    cmp  ax, 14            ; pad1_x + pad1_w = 8+6 = 14
-    jg   check_pad2
-
-    mov  ax, [ball_y]
-    add  ax, [ball_size]
-    cmp  ax, [pad1_y]
-    jl   miss_left         ; Bong di qua paddle -> ghi diem P2
-
-    mov  ax, [ball_y]
-    mov  bx, [pad1_y]
-    add  bx, [pad1_h]
-    cmp  ax, bx
-    jg   miss_left
-
-    ; Va cham! Doi huong X, dat bong ra ngoai paddle
-    mov  [ball_x], 15
-    neg  [ball_dx]
-    jmp  check_score
-
-miss_left:
-    ; P2 ghi diem
-    cmp  [ball_x], 0
-    jge  check_pad2
-    inc  [pad2_score]
-    call reset_ball
-    jmp  check_score
-
-check_pad2:
-    ; ---- Va cham Paddle PHAI ----
-    mov  ax, [ball_x]
-    add  ax, [ball_size]
-    cmp  ax, [pad2_x]      ; 306
-    jl   check_score
-
-    mov  ax, [ball_y]
-    add  ax, [ball_size]
-    cmp  ax, [pad2_y]
-    jl   miss_right
-
-    mov  ax, [ball_y]
-    mov  bx, [pad2_y]
-    add  bx, [pad2_h]
-    cmp  ax, bx
-    jg   miss_right
-
-    ; Va cham!
-    mov  [ball_x], 305
-    neg  [ball_dx]
-    jmp  check_score
-
-miss_right:
-    ; P1 ghi diem
-    mov  ax, [ball_x]
-    cmp  ax, SCREEN_W
-    jl   check_score
-    inc  [pad1_score]
-    call reset_ball
-
-check_score:
-    ; ---- Kiem tra thang (dat 7 diem) ----
-    cmp  [pad1_score], 7
-    jl   check_score2
-    mov  [game_over], 1
-    mov  [winner], 1
-    ret
-
-check_score2:
-    cmp  [pad2_score], 7
-    jl   update_done
-    mov  [game_over], 1
-    mov  [winner], 2
-
-update_done:
-    ret
-update_ball endp
-
-; ============================================================
-;  DAT LAI QUA BONG VE TRUNG TAM
-; ============================================================
-reset_ball proc
-    mov  [ball_x], 160
-    mov  [ball_y], 100
-    ; Doi huong X moi lan dat lai
-    neg  [ball_dx]
-    ret
-reset_ball endp
-
-; ============================================================
-;  VE TOAN BO MAN HINH (RENDER FRAME)
-;  Xoa -> Ve vien -> Ve duong giua -> Ve paddles -> Ve bong -> Ve diem
-; ============================================================
-render_frame proc
-    call clear_screen
-    call draw_border
-    call draw_center_line
-    call draw_paddle1
-    call draw_paddle2
-    call draw_ball
-    call draw_scores
-    ret
-render_frame endp
-
-; ============================================================
-;  XOA MAN HINH - To den toan bo 320x200 = 64000 bytes
-;  Dung REP STOSB de to nhanh nhat co the
-; ============================================================
-clear_screen proc
-    ; ES da tro vao A000h tu truoc
-    xor  di, di            ; DI = 0 (bat dau tu pixel (0,0))
-    mov  cx, SCREEN_W * SCREEN_H  ; 64000 pixel
-    mov  al, CLR_BLACK     ; Mau den
-    rep  stosb             ; To 64000 byte lien tiep = XOA MAN HINH
-    ret
-clear_screen endp
-
-; ============================================================
-;  VE VIEN MAN HINH (mau xam)
-; ============================================================
-draw_border proc
-    ; Duong tren (y=0): 320 pixel
-    xor  di, di
-    mov  cx, SCREEN_W
-    mov  al, CLR_GRAY
-    rep  stosb
-
-    ; Duong duoi (y=199): 320 pixel
-    mov  di, 199 * SCREEN_W
-    mov  cx, SCREEN_W
-    mov  al, CLR_GRAY
-    rep  stosb
-
-    ; Vien trai va phai (tung pixel y tu 0..199)
-    mov  cx, SCREEN_H
-    xor  bx, bx            ; BX = y
-border_sides:
-    ; Pixel trai (x=0)
-    mov  di, bx
-    mov  byte ptr es:[di], CLR_GRAY
-
-    ; Pixel phai (x=319)
-    mov  di, bx
-    add  di, SCREEN_W - 1
-    mov  byte ptr es:[di], CLR_GRAY
-
-    add  bx, SCREEN_W      ; Xuong dong tiep theo
-    loop border_sides
-
-    ret
-draw_border endp
-
-; ============================================================
-;  VE DUONG GIUA (vach ke, mau vang)
-; ============================================================
-draw_center_line proc
-    mov  bx, 0             ; y = 0
-center_loop:
-    cmp  bx, SCREEN_H
-    jge  center_done
-
-    ; Ve 4 pixel, ngat quang 4 pixel (hieu ung vach ke)
-    mov  ax, bx
-    and  ax, 7             ; ax = bx mod 8
-    cmp  ax, 4
-    jge  center_skip       ; Bo qua 4 pixel cuoi moi nhom 8
-
-    ; Ve pixel tai (160, y)
-    mov  di, bx
-    add  di, 160           ; x = 160
-    mov  byte ptr es:[di], CLR_YELLOW
-
-center_skip:
-    add  bx, SCREEN_W      ; Xuong dong tiep theo
-    jmp  center_loop
-
-center_done:
-    ret
-draw_center_line endp
-
-; ============================================================
-;  VE PADDLE 1 (TRAI - mau xanh la)
-;  Su dung tinh toan: offset = y*320 + x
+; VUNG DU LIEU
 ; ============================================================
 
+BOARD   DB 100 DUP(0)   ; 0=trong 1=X 2=O
 
-; Chu y: bx o tren dang dung lam offset dong (y*320)
-; Ta can tinh offset tu so dong y
-; Sua lai: dung ham tinh chinh xac
+BSIZE   DB 3            ; Kich thuoc: 3, 5, hoac 10
+WLEN    DB 3            ; So o lien tiep de thang
+GMODE   DB 0            ; 0=2 nguoi  1=AI
+CPLYR   DB 1            ; Nguoi choi hien tai: 1=X  2=O
+NMOVES  DB 0            ; So nuoc da di
+WINNER  DB 0            ; 0=chua xong  1=X  2=O  3=Hoa
+TCELLS  DB 9            ; BSIZE*BSIZE
 
-draw_paddle1 proc
-    ; Tinh offset cho y dau tien: di = pad1_y * 320 + pad1_x
-    mov  ax, [pad1_y]
-    mov  bx, SCREEN_W
-    mul  bx                ; ax = pad1_y * 320
-    add  ax, [pad1_x]      ; ax = pad1_y*320 + pad1_x
-    mov  di, ax
+SCX     DB 0            ; Diem X
+SCO     DB 0            ; Diem O
+SCD     DB 0            ; So van hoa
 
-    mov  cx, [pad1_h]      ; So dong
+BROW    DB 5            ; Dong bat dau ve ban co
+BCOL    DB 28           ; Cot bat dau ve ban co
 
-dp1_row:
-    push cx
-    push di
-    mov  cx, [pad1_w]      ; So pixel moi dong
-    mov  al, CLR_GREEN
-    rep  stosb             ; Ve dong ngang
-    pop  di
-    pop  cx
+TR      DB 0            ; Hang nguoi choi nhap
+TC      DB 0            ; Cot nguoi choi nhap
+AIMV    DB 0            ; Nuoc AI chon (index 0..99)
+AI_OK   DB 0            ; 1 neu AI tim duoc nuoc
 
-    add  di, SCREEN_W      ; Xuong dong ke
-    loop dp1_row
+; Bien dung trong CHKWIN / CHKDIR
+VR      DB 0
+VC      DB 0
+VPLR    DB 0
+VDIR_R  DB 0
+VDIR_C  DB 0
 
-    ret
-draw_paddle1 endp
-
-; ============================================================
-;  VE PADDLE 2 (PHAI - mau do)
-; ============================================================
-draw_paddle2 proc
-    mov  ax, [pad2_y]
-    mov  bx, SCREEN_W
-    mul  bx
-    add  ax, [pad2_x]
-    mov  di, ax
-
-    mov  cx, [pad2_h]
-
-dp2_row:
-    push cx
-    push di
-    mov  cx, [pad2_w]
-    mov  al, CLR_RED
-    rep  stosb
-    pop  di
-    pop  cx
-
-    add  di, SCREEN_W
-    loop dp2_row
-
-    ret
-draw_paddle2 endp
+; Bien tam noi bo CHKDIR
+CD_HR   DB 0
+CD_HC   DB 0
 
 ; ============================================================
-;  VE QUA BONG (hinh vuong 4x4, mau xanh cyan)
+; CHUOI VAN BAN (ket thuc bang '$')
 ; ============================================================
-draw_ball proc
-    mov  ax, [ball_y]
-    mov  bx, SCREEN_W
-    mul  bx
-    add  ax, [ball_x]
-    mov  di, ax
 
-    mov  cx, [ball_size]   ; 4 dong
+S_LINE  DB '================================================$'
+S_T1    DB '   GAME CARO - ASM 8086 NANG CAP - v2.0       $'
+S_T2    DB '   Ban 3x3 / 5x5 / 10x10  |  Che do AI        $'
 
-draw_ball_row:
-    push cx
-    push di
-    mov  cx, [ball_size]   ; 4 pixel moi dong
-    mov  al, CLR_CYAN
-    rep  stosb
-    pop  di
-    pop  cx
+S_MS0   DB ' CHON KICH THUOC BAN CO:$'
+S_MS1   DB '  [1] Ban  3 x  3  (thang 3 o lien tiep)$'
+S_MS2   DB '  [2] Ban  5 x  5  (thang 3 o lien tiep)$'
+S_MS3   DB '  [3] Ban 10 x 10  (thang 5 o lien tiep)$'
 
-    add  di, SCREEN_W
-    loop draw_ball_row
+S_MD0   DB ' CHON CHE DO:$'
+S_MD1   DB '  [1] Hai nguoi choi (PvP)$'
+S_MD2   DB '  [2] Danh voi may  (AI)$'
 
-    ret
-draw_ball endp
+S_PICK  DB ' >> Lua chon: $'
 
-; ============================================================
-;  VE DIEM SO (dang chu so pixel art 5x7)
-;  Ve so don gian tai vi tri co dinh
-; ============================================================
-draw_scores proc
-    ; Ve diem P1 tai (120, 10)
-    mov  ax, [pad1_score]
-    mov  bx, 120           ; X
-    mov  cx, 10            ; Y
-    call draw_digit
+S_TRN   DB ' LUOT: $'
+S_PLX   DB 'X (Nguoi 1)$'
+S_PLO   DB 'O (Nguoi 2)$'
+S_PLAI  DB 'O (May AI) $'
 
-    ; Ve diem P2 tai (190, 10)
-    mov  ax, [pad2_score]
-    mov  bx, 190           ; X
-    mov  cx, 10            ; Y
-    call draw_digit
+S_IROW  DB ' Nhap HANG (0-?): $'
+S_ICOL  DB ' Nhap COT  (0-?): $'
 
-    ret
-draw_scores endp
+S_WX    DB ' *** NGUOI X CHIEN THANG! CHUC MUNG! ***$'
+S_WO    DB ' *** NGUOI O CHIEN THANG! CHUC MUNG! ***$'
+S_WAI   DB ' *** MAY (AI) CHIEN THANG! RAT TIEC... ***$'
+S_DRAW  DB ' *** HOA NHAU! HAI BEN NGANG TAI ***$'
+S_USED  DB ' O nay da co roi! Chon o khac.$'
+S_INVL  DB ' So khong hop le! Nhap lai.    $'
+S_AIWT  DB ' May dang suy nghi...          $'
 
-; ---- Ve 1 chu so (0-9) tai vi tri (bx=x, cx=y), ax=gia tri ----
-; Su dung pixel art thu cong (5x7 pixel moi so)
-draw_digit proc
-    ; Tinh offset co so
-    push bx
-    push cx
+S_SC1   DB ' SCORE: X=$'
+S_SC2   DB '  O=$'
+S_SC3   DB '  HOA=$'
 
-    mov  di, cx            ; y
-    mov  dx, SCREEN_W
-    ; di = cx*320 + bx
-    push ax
-    mov  ax, cx
-    mul  dx
-    pop  dx                ; dx = so can ve
-    add  ax, bx            ; ax = cy*320 + bx
-    mov  di, ax
-    mov  ax, dx            ; ax = digit value
-
-    ; Chi ve hinh chu nhat don gian theo gia tri
-    ; (pixel art so day du se qua dai, dung o dang gian luoc)
-    ; Ve so kieu "7-segment" don gian bang cac thanh 5px
-
-    cmp  ax, 0
-    je   dig_0
-    cmp  ax, 1
-    je   dig_1
-    cmp  ax, 2
-    je   dig_2
-    cmp  ax, 3
-    je   dig_3
-    cmp  ax, 4
-    je   dig_4
-    cmp  ax, 5
-    je   dig_5
-    cmp  ax, 6
-    je   dig_6
-    cmp  ax, 7
-    je   dig_7
-
-    ; Mac dinh: ve o vuong
-    jmp  dig_draw_box
-
-dig_0:
-    call draw_digit_0
-    jmp  dig_done
-dig_1:
-    call draw_digit_1
-    jmp  dig_done
-dig_2:
-    call draw_digit_2
-    jmp  dig_done
-dig_3:
-    call draw_digit_3
-    jmp  dig_done
-dig_4:
-    call draw_digit_4
-    jmp  dig_done
-dig_5:
-    call draw_digit_5
-    jmp  dig_done
-dig_6:
-    call draw_digit_6
-    jmp  dig_done
-dig_7:
-    call draw_digit_7
-    jmp  dig_done
-
-dig_draw_box:
-    ; Ve o trang don gian (5x7)
-    mov  cx, 7
-dig_box_row:
-    push cx
-    push di
-    mov  cx, 5
-    mov  al, CLR_WHITE
-    rep  stosb
-    pop  di
-    pop  cx
-    add  di, SCREEN_W
-    loop dig_box_row
-
-dig_done:
-    pop  cx
-    pop  bx
-    ret
-draw_digit endp
-
-; ---- Cac hinh dang so pixel art 5x7 ----
-; DI da tro vao vi tri bat dau, ES = A000h
-
-; Macro nho: ve 1 hang 5 pixel
-; Ta dung inline cho nhanh
-
-draw_digit_0 proc
-    ; 0: ###
-    ;    # #
-    ;    # #
-    ;    # #
-    ;    ###
-    push di
-    ; Hang 1: 5 trang
-    mov  cx, 5 
-    mov al, CLR_WHITE 
-    rep stosb 
-    add di, SCREEN_W-5
-    ; Hang 2: trang + den + trang
-    mov  byte ptr es:[di], CLR_WHITE
-    mov  byte ptr es:[di+1], CLR_BLACK
-    mov  byte ptr es:[di+2], CLR_BLACK
-    mov  byte ptr es:[di+3], CLR_BLACK
-    mov  byte ptr es:[di+4], CLR_WHITE
-    add  di, SCREEN_W
-    ; Hang 3,4 giong hang 2
-    mov  byte ptr es:[di], CLR_WHITE
-    mov  byte ptr es:[di+4], CLR_WHITE
-    add  di, SCREEN_W
-    mov  byte ptr es:[di], CLR_WHITE
-    mov  byte ptr es:[di+4], CLR_WHITE
-    add  di, SCREEN_W
-    ; Hang 5: giong hang 2
-    mov  byte ptr es:[di], CLR_WHITE
-    mov  byte ptr es:[di+4], CLR_WHITE
-    add  di, SCREEN_W
-    ; Hang 6: giong hang 2
-    mov  byte ptr es:[di], CLR_WHITE
-    mov  byte ptr es:[di+4], CLR_WHITE
-    add  di, SCREEN_W
-    ; Hang 7: 5 trang
-    mov  cx, 5
-    mov  al, CLR_WHITE
-    rep  stosb
-    pop  di
-    ret
-draw_digit_0 endp
-
-draw_digit_1 proc
-    ; 1:  #
-    ;     #
-    ;     #
-    push di
-    mov  cx, 7
-dg1_loop:
-    mov  byte ptr es:[di+2], CLR_WHITE
-    add  di, SCREEN_W
-    loop dg1_loop
-    pop  di
-    ret
-draw_digit_1 endp
-
-draw_digit_2 proc
-    ; 2: ###
-    ;      #
-    ;    ###
-    ;    #
-    ;    ###
-    push di
-    ; H1
-    mov  cx, 5 
-    mov al, CLR_WHITE 
-    rep stosb 
-    add di, SCREEN_W-5
-    ; H2
-    mov  byte ptr es:[di+4], CLR_WHITE
-    add  di, SCREEN_W
-    ; H3
-    mov  cx, 5 
-    mov al, CLR_WHITE 
-    rep stosb 
-    add di, SCREEN_W-5
-    ; H4
-    mov  byte ptr es:[di], CLR_WHITE
-    add  di, SCREEN_W
-    ; H5
-    mov  byte ptr es:[di], CLR_WHITE
-    add  di, SCREEN_W
-    ; H6
-    mov  byte ptr es:[di], CLR_WHITE
-    add  di, SCREEN_W
-    ; H7
-    mov  cx, 5 
-    mov al, CLR_WHITE 
-    rep stosb
-    pop  di
-    ret
-draw_digit_2 endp
-
-draw_digit_3 proc
-    push di
-    mov  cx, 5 
-    mov al, CLR_WHITE 
-    rep stosb 
-    add di, SCREEN_W-5
-    mov  byte ptr es:[di+4], CLR_WHITE 
-	add di, SCREEN_W
-    mov  byte ptr es:[di+4], CLR_WHITE 
-	add di, SCREEN_W
-    mov  cx, 5 
-	mov al, CLR_WHITE 
-	rep stosb 
-	add di, SCREEN_W-5
-    mov  byte ptr es:[di+4], CLR_WHITE 
-	add di, SCREEN_W
-    mov  byte ptr es:[di+4], CLR_WHITE 
-	add di, SCREEN_W
-    mov  byte ptr es:[di+4], CLR_WHITE 
-	add di, SCREEN_W
-    mov  cx, 5 
-	mov al, CLR_WHITE 
-	rep stosb
-    pop  di
-    ret
-draw_digit_3 endp
-
-draw_digit_4 proc
-    push di
-    mov  byte ptr es:[di], CLR_WHITE 
-	mov byte ptr es:[di+4], CLR_WHITE 
-	add di, SCREEN_W
-    mov  byte ptr es:[di], CLR_WHITE 
-	mov byte ptr es:[di+4], CLR_WHITE 
-	add di, SCREEN_W
-    mov  byte ptr es:[di], CLR_WHITE 
-	mov byte ptr es:[di+4], CLR_WHITE 
-	add di, SCREEN_W
-    mov  cx, 5 
-    mov al, CLR_WHITE 
-    rep stosb 
-    add di, SCREEN_W-5
-    mov  byte ptr es:[di+4], CLR_WHITE 
-	add di, SCREEN_W
-    mov  byte ptr es:[di+4], CLR_WHITE 
-	add di, SCREEN_W
-    mov  byte ptr es:[di+4], CLR_WHITE 
-	add di, SCREEN_W
-    pop  di
-    ret
-draw_digit_4 endp
-
-draw_digit_5 proc
-    push di
-    mov  cx, 5 
-    mov al, CLR_WHITE 
-    rep stosb 
-    add di, SCREEN_W-5
-    mov  byte ptr es:[di], CLR_WHITE 
-	add di, SCREEN_W
-    mov  byte ptr es:[di], CLR_WHITE 
-	add di, SCREEN_W
-    mov  cx, 5 
-    mov al, CLR_WHITE 
-    rep stosb 
-    add di, SCREEN_W-5
-    mov  byte ptr es:[di+4], CLR_WHITE 
-	add di, SCREEN_W
-    mov  byte ptr es:[di+4], CLR_WHITE 
-	add di, SCREEN_W
-    mov  cx, 5 
-    mov al, CLR_WHITE 
-    rep stosb
-    pop  di
-    ret
-draw_digit_5 endp
-
-draw_digit_6 proc
-    push di
-    mov  cx, 5 
-    mov al, CLR_WHITE 
-    rep stosb 
-    add di, SCREEN_W-5
-    mov  byte ptr es:[di], CLR_WHITE 
-	add di, SCREEN_W
-    mov  byte ptr es:[di], CLR_WHITE 
-	add di, SCREEN_W
-    mov  cx, 5 
-    mov al, CLR_WHITE 
-    rep stosb 
-    add di, SCREEN_W-5
-    mov  byte ptr es:[di], CLR_WHITE 
-	mov byte ptr es:[di+4], CLR_WHITE 
-	add di, SCREEN_W
-    mov  byte ptr es:[di], CLR_WHITE 
-	mov byte ptr es:[di+4], CLR_WHITE 
-	add di, SCREEN_W
-    mov  cx, 5 
-    mov al, CLR_WHITE 
-    rep stosb
-    pop  di
-    ret
-draw_digit_6 endp
-
-draw_digit_7 proc
-    push di
-    mov  cx, 5 
-	mov al, CLR_WHITE 
-	rep stosb 
-	add di, SCREEN_W-5
-    mov  byte ptr es:[di+4], CLR_WHITE 
-	add di, SCREEN_W
-    mov  byte ptr es:[di+4], CLR_WHITE 
-	add di, SCREEN_W
-    mov  byte ptr es:[di+2], CLR_WHITE 
-	add di, SCREEN_W
-    mov  byte ptr es:[di+2], CLR_WHITE 
-	add di, SCREEN_W
-    mov  byte ptr es:[di+2], CLR_WHITE 
-	add di, SCREEN_W
-    mov  byte ptr es:[di+2], CLR_WHITE
-    pop  di
-    ret
-draw_digit_7 endp
+S_AGN   DB ' Choi lai? [Y/N]: $'
+S_BACK  DB ' Menu chinh? [Y/N]: $'
+S_BYE   DB ' Cam on da choi! Hen gap lai!$'
+S_GD    DB ' [Nhap hang 0..N-1 va cot 0..N-1]$'
 
 ; ============================================================
-;  HIEN THI NGUOI THANG
+; CHUONG TRINH CHINH
 ; ============================================================
-show_winner proc
-    call clear_screen
 
-    ; Ve chu "P1 WIN" hoac "P2 WIN" bang cach to mau
-    cmp  [winner], 1
-    je   show_p1_win
+START:
+    MOV AX, CS
+    MOV DS, AX
 
-    ; P2 thang: ve cot mau do lon o giua
-    mov  ax, 80 * SCREEN_W + 120
-    mov  di, ax
-    mov  cx, 40
-sw_p2_row:
-    push cx
-    push di
-    mov  cx, 80
-    mov  al, CLR_RED
-    rep  stosb
-    pop  di
-    pop  cx
-    add  di, SCREEN_W
-    loop sw_p2_row
-    ret
+; ---- MENU CHON KICH THUOC ----
+MENU_SIZE:
+    CALL CLR
+    CALL SETBG
+    CALL PRTHDR
 
-show_p1_win:
-    ; P1 thang: ve cot mau xanh lon o giua
-    mov  ax, 80 * SCREEN_W + 120
-    mov  di, ax
-    mov  cx, 40
-sw_p1_row:
-    push cx
-    push di
-    mov  cx, 80
-    mov  al, CLR_GREEN
-    rep  stosb
-    pop  di
-    pop  cx
-    add  di, SCREEN_W
-    loop sw_p1_row
-    ret
-show_winner endp
+    MOV DH, 6
+    MOV DL, 2
+    CALL GOXY
+    MOV BL, 03FH
+    LEA DX, S_MS0
+    CALL PCOL
+
+    MOV DH, 7
+    MOV DL, 2
+    CALL GOXY
+    MOV BL, 01FH
+    LEA DX, S_MS1
+    CALL PCOL
+
+    MOV DH, 8
+    MOV DL, 2
+    CALL GOXY
+    LEA DX, S_MS2
+    CALL PCOL
+
+    MOV DH, 9
+    MOV DL, 2
+    CALL GOXY
+    LEA DX, S_MS3
+    CALL PCOL
+
+    MOV DH, 11
+    MOV DL, 2
+    CALL GOXY
+    MOV BL, 01EH
+    LEA DX, S_PICK
+    CALL PCOL
+
+    MOV AH, 01H
+    INT 21H
+
+    CMP AL, '1'
+    JNE MS2
+    MOV BSIZE,  3
+    MOV WLEN,   3
+    MOV TCELLS, 9
+    MOV BROW,   5
+    MOV BCOL,   28
+    JMP MENU_MODE
+MS2:
+    CMP AL, '2'
+    JNE MS3
+    MOV BSIZE,  5
+    MOV WLEN,   3
+    MOV TCELLS, 25
+    MOV BROW,   4
+    MOV BCOL,   20
+    JMP MENU_MODE
+MS3:
+    CMP AL, '3'
+    JNE MENU_SIZE
+    MOV BSIZE,  10
+    MOV WLEN,   5
+    MOV TCELLS, 100
+    MOV BROW,   3
+    MOV BCOL,   2
+
+; ---- MENU CHON CHE DO ----
+MENU_MODE:
+    CALL CLR
+    CALL SETBG
+    CALL PRTHDR
+
+    MOV DH, 6
+    MOV DL, 2
+    CALL GOXY
+    MOV BL, 03FH
+    LEA DX, S_MD0
+    CALL PCOL
+
+    MOV DH, 7
+    MOV DL, 2
+    CALL GOXY
+    MOV BL, 01FH
+    LEA DX, S_MD1
+    CALL PCOL
+
+    MOV DH, 8
+    MOV DL, 2
+    CALL GOXY
+    LEA DX, S_MD2
+    CALL PCOL
+
+    MOV DH, 10
+    MOV DL, 2
+    CALL GOXY
+    MOV BL, 01EH
+    LEA DX, S_PICK
+    CALL PCOL
+
+    MOV AH, 01H
+    INT 21H
+
+    CMP AL, '1'
+    JE  MD_2P
+    CMP AL, '2'
+    JE  MD_AI
+    JMP MENU_MODE
+MD_2P:
+    MOV GMODE, 0
+    JMP NEW_GAME
+MD_AI:
+    MOV GMODE, 1
+
+; ---- VAN MOI ----
+NEW_GAME:
+    CALL RESET_BRD
+    CALL DRAW_SCR
+
+; ---- VONG CHOI ----
+GLOOP:
+    CALL SHOW_TRN
+
+    CMP GMODE, 1
+    JNE GL_HMN
+    CMP CPLYR, 2
+    JNE GL_HMN
+    CALL DO_AI
+    JMP GL_AFT
+GL_HMN:
+    CALL DO_HMN
+GL_AFT:
+    ; Kiem tra thang
+    MOV AL, CPLYR
+    CALL CHKWIN
+    CMP AL, 0
+    JE  GL_DRAW
+
+    MOV AL, CPLYR
+    MOV WINNER, AL
+    CALL DRAW_SCR
+    CALL SHOW_WIN
+    JMP REPLAY
+
+GL_DRAW:
+    MOV AL, NMOVES
+    CMP AL, TCELLS
+    JNE GL_CONT
+    MOV WINNER, 3
+    CALL DRAW_SCR
+    CALL SHOW_DRAW
+    JMP REPLAY
+
+GL_CONT:
+    MOV AL, CPLYR
+    CMP AL, 1
+    JNE GC_SO
+    MOV CPLYR, 2
+    JMP GLOOP
+GC_SO:
+    MOV CPLYR, 1
+    JMP GLOOP
+
+REPLAY:
+    MOV DH, 22
+    MOV DL, 2
+    CALL GOXY
+    MOV BL, 01FH
+    LEA DX, S_AGN
+    CALL PCOL
+
+    MOV AH, 01H
+    INT 21H
+    CMP AL, 'Y'
+    JE  NEW_GAME
+    CMP AL, 'y'
+    JE  NEW_GAME
+    CMP AL, 'N'
+    JE  REPLAY2
+    CMP AL, 'n'
+    JE  REPLAY2
+    JMP REPLAY
+
+REPLAY2:
+    MOV DH, 23
+    MOV DL, 2
+    CALL GOXY
+    MOV BL, 01FH
+    LEA DX, S_BACK
+    CALL PCOL
+
+    MOV AH, 01H
+    INT 21H
+    CMP AL, 'Y'
+    JE  MENU_SIZE
+    CMP AL, 'y'
+    JE  MENU_SIZE
+
+    CALL CLR
+    CALL SETBG
+    MOV DH, 12
+    MOV DL, 18
+    CALL GOXY
+    MOV BL, 01EH
+    LEA DX, S_BYE
+    CALL PCOL
+    MOV AH, 4CH
+    INT 21H
 
 ; ============================================================
-;  DELAY - Lam cham game loop xuong ~30fps
+; PROC: RESET_BRD
 ; ============================================================
-delay_frame proc
-    ; Dung vong lap CPU don gian (khong dung timer interrupt)
-    mov  cx, 0FFFFh
-delay_loop:
-    nop
-    loop delay_loop
-    ret
-delay_frame endp
+RESET_BRD PROC
+    MOV CX, 100
+    LEA DI, BOARD
+    MOV AL, 0
+RB_L:
+    MOV [DI], AL
+    INC DI
+    LOOP RB_L
+    MOV CPLYR,  1
+    MOV NMOVES, 0
+    MOV WINNER, 0
+    RET
+RESET_BRD ENDP
 
-end main
+; ============================================================
+; PROC: DRAW_SCR - Ve man hinh game
+; ============================================================
+DRAW_SCR PROC
+    CALL CLR
+    CALL SETBG
+    CALL PRTHDR
+    CALL DBOARD
+    CALL DSCORE
+    CALL DGUIDE
+    RET
+DRAW_SCR ENDP
+
+; ============================================================
+; PROC: DBOARD - Ve ban co
+; Su dung CH=hang, CL=cot (bien dem noi bo)
+; ============================================================
+DBOARD PROC
+    MOV CH, 0           ; hang = 0
+DB_ROW:
+    MOV AL, BSIZE
+    CMP CH, AL
+    JAE DB_END
+
+    MOV CL, 0           ; cot = 0
+DB_COL:
+    MOV AL, BSIZE
+    CMP CL, AL
+    JAE DB_NROW
+
+    ; Tinh dong man hinh = BROW + hang*2
+    MOV AL, CH
+    SHL AL, 1
+    ADD AL, BROW
+    MOV DH, AL
+
+    ; Tinh cot man hinh = BCOL + cot*4
+    MOV AL, CL
+    SHL AL, 1
+    SHL AL, 1
+    ADD AL, BCOL
+    MOV DL, AL
+    CALL GOXY
+
+    ; Index = hang * BSIZE + cot
+    MOV AL, CH
+    MUL BSIZE           ; AX = CH * BSIZE  (AH=0 vi BSIZE<=10)
+    ADD AL, CL
+    MOV AH, 0
+    MOV SI, AX
+    MOV AL, BOARD[SI]
+
+    CMP AL, 0
+    JE  DBE
+    CMP AL, 1
+    JE  DBX
+    ; Ve O
+    MOV BL, 01CH
+    MOV DL, 'O'
+    CALL PCH
+    JMP DBSEP
+DBX:
+    ; Ve X
+    MOV BL, 01EH
+    MOV DL, 'X'
+    CALL PCH
+    JMP DBSEP
+DBE:
+    ; Ve o trong
+    MOV BL, 017H
+    MOV DL, '.'
+    CALL PCH
+
+DBSEP:
+    ; Ke cot (tru cot cuoi)
+    MOV AL, BSIZE
+    DEC AL
+    CMP CL, AL
+    JE  DB_NCOL
+    MOV BL, 01BH
+    MOV DL, '|'
+    CALL PCH
+    MOV BL, 017H
+    MOV DL, ' '
+    CALL PCH
+
+DB_NCOL:
+    INC CL
+    JMP DB_COL
+
+DB_NROW:
+    ; Ke hang (tru hang cuoi)
+    MOV AL, BSIZE
+    DEC AL
+    CMP CH, AL
+    JE  DB_NHLINE
+
+    MOV AL, CH
+    SHL AL, 1
+    INC AL
+    ADD AL, BROW
+    MOV DH, AL
+    MOV DL, BCOL
+    CALL GOXY
+
+    ; Do rong ke = BSIZE*4 - 1
+    MOV AL, BSIZE
+    SHL AL, 1
+    SHL AL, 1
+    DEC AL
+    MOV AH, 0
+    MOV CX, AX
+DBHL:
+    MOV BL, 01BH
+    MOV DL, '-'
+    CALL PCH
+    LOOP DBHL
+
+DB_NHLINE:
+    INC CH
+    JMP DB_ROW
+
+DB_END:
+    RET
+DBOARD ENDP
+
+; ============================================================
+; PROC: SHOW_TRN - Hien thi luot choi
+; ============================================================
+SHOW_TRN PROC
+    ; Dong = BROW + BSIZE*2 + 1
+    MOV AL, BSIZE
+    SHL AL, 1
+    ADD AL, BROW
+    INC AL
+    MOV DH, AL
+    MOV DL, 2
+    CALL GOXY
+
+    ; Xoa dong
+    MOV CX, 50
+STN_C:
+    MOV BL, 017H
+    MOV DL, ' '
+    CALL PCH
+    LOOP STN_C
+
+    MOV AL, BSIZE
+    SHL AL, 1
+    ADD AL, BROW
+    INC AL
+    MOV DH, AL
+    MOV DL, 2
+    CALL GOXY
+
+    MOV BL, 01FH
+    LEA DX, S_TRN
+    CALL PCOL
+
+    MOV AL, CPLYR
+    CMP AL, 1
+    JNE STN_O
+    MOV BL, 01EH
+    LEA DX, S_PLX
+    CALL PCOL
+    RET
+STN_O:
+    CMP GMODE, 1
+    JNE STN_O2P
+    MOV BL, 01CH
+    LEA DX, S_PLAI
+    CALL PCOL
+    RET
+STN_O2P:
+    MOV BL, 01CH
+    LEA DX, S_PLO
+    CALL PCOL
+    RET
+SHOW_TRN ENDP
+
+; ============================================================
+; PROC: DO_HMN - Nguoi choi nhap nuoc
+; ============================================================
+DO_HMN PROC
+    ; Tinh dong nhap = BROW + BSIZE*2 + 2
+    MOV AL, BSIZE
+    SHL AL, 1
+    ADD AL, BROW
+    ADD AL, 2
+    MOV BH, AL          ; BH = dong bat dau nhap
+
+HG_LP:
+    ; Xoa 3 dong nhap
+    MOV DH, BH
+    MOV DL, 2
+    CALL GOXY
+    MOV CX, 55
+HGC1:
+    MOV BL, 017H
+    MOV DL, ' '
+    CALL PCH
+    LOOP HGC1
+
+    MOV AL, BH
+    INC AL
+    MOV DH, AL
+    MOV DL, 2
+    CALL GOXY
+    MOV CX, 55
+HGC2:
+    MOV BL, 017H
+    MOV DL, ' '
+    CALL PCH
+    LOOP HGC2
+
+    MOV AL, BH
+    ADD AL, 2
+    MOV DH, AL
+    MOV DL, 2
+    CALL GOXY
+    MOV CX, 50
+HGC3:
+    MOV BL, 017H
+    MOV DL, ' '
+    CALL PCH
+    LOOP HGC3
+
+    ; Nhap hang
+    MOV DH, BH
+    MOV DL, 2
+    CALL GOXY
+    MOV BL, 03FH
+    LEA DX, S_IROW
+    CALL PCOL
+
+    MOV AH, 01H
+    INT 21H
+
+    CMP AL, '0'
+    JB  HG_INV
+
+    ; Gioi han tren: '0' + BSIZE - 1
+    MOV AH, BSIZE
+    ADD AH, '0'
+    DEC AH
+    CMP AL, AH
+    JA  HG_INV
+
+    SUB AL, '0'
+    MOV TR, AL
+
+    ; Nhap cot
+    MOV AL, BH
+    INC AL
+    MOV DH, AL
+    MOV DL, 2
+    CALL GOXY
+    MOV BL, 03FH
+    LEA DX, S_ICOL
+    CALL PCOL
+
+    MOV AH, 01H
+    INT 21H
+
+    CMP AL, '0'
+    JB  HG_INV
+
+    MOV AH, BSIZE
+    ADD AH, '0'
+    DEC AH
+    CMP AL, AH
+    JA  HG_INV
+
+    SUB AL, '0'
+    MOV TC, AL
+
+    ; Index = TR * BSIZE + TC
+    MOV AL, TR
+    MUL BSIZE
+    ADD AL, TC
+    MOV AH, 0
+    MOV SI, AX
+
+    CMP BOARD[SI], 0
+    JNE HG_USED
+
+    MOV AL, CPLYR
+    MOV BOARD[SI], AL
+    INC NMOVES
+    CALL DBOARD
+    RET
+
+HG_INV:
+    MOV AL, BH
+    ADD AL, 2
+    MOV DH, AL
+    MOV DL, 2
+    CALL GOXY
+    MOV BL, 01CH
+    LEA DX, S_INVL
+    CALL PCOL
+    MOV AH, 08H
+    INT 21H
+    JMP HG_LP
+
+HG_USED:
+    MOV AL, BH
+    ADD AL, 2
+    MOV DH, AL
+    MOV DL, 2
+    CALL GOXY
+    MOV BL, 01CH
+    LEA DX, S_USED
+    CALL PCOL
+    MOV AH, 08H
+    INT 21H
+    JMP HG_LP
+DO_HMN ENDP
+
+; ============================================================
+; PROC: DO_AI - Nuoc di cua may
+; Chien luoc: thang ngay > chan X > trung tam > goc > o trong dau
+; ============================================================
+DO_AI PROC
+    ; Hien thi thong bao
+    MOV AL, BSIZE
+    SHL AL, 1
+    ADD AL, BROW
+    ADD AL, 2
+    MOV DH, AL
+    MOV DL, 2
+    CALL GOXY
+    MOV BL, 01BH
+    LEA DX, S_AIWT
+    CALL PCOL
+
+    MOV AIMV,  0
+    MOV AI_OK, 0
+
+    ; B1: Tim nuoc thang cua O(2)
+    MOV VPLR, 2
+    CALL FINDWIN
+    CMP AI_OK, 1
+    JE  AI_PLACE
+
+    ; B2: Chan nuoc thang X(1)
+    MOV VPLR, 1
+    CALL FINDWIN
+    CMP AI_OK, 1
+    JE  AI_PLACE
+
+    ; B3: Trung tam = TCELLS / 2
+    MOV AL, TCELLS
+    SHR AL, 1
+    MOV AH, 0
+    MOV SI, AX
+    CMP BOARD[SI], 0
+    JNE AI_CORN
+    MOV AIMV, AL
+    MOV AI_OK, 1
+    JMP AI_PLACE
+
+AI_CORN:
+    ; Goc trai tren (index 0)
+    CMP BOARD[0], 0
+    JNE AI_C2
+    MOV AIMV,  0
+    MOV AI_OK, 1
+    JMP AI_PLACE
+AI_C2:
+    ; Goc phai tren (index BSIZE-1)
+    MOV AL, BSIZE
+    DEC AL
+    MOV AH, 0
+    MOV SI, AX
+    CMP BOARD[SI], 0
+    JNE AI_SCAN
+    MOV AIMV,  AL
+    MOV AI_OK, 1
+    JMP AI_PLACE
+
+AI_SCAN:
+    ; Tim o trong dau tien
+    MOV SI, 0
+AI_SLP:
+    MOV AL, TCELLS
+    MOV AH, 0
+    CMP SI, AX
+    JAE AI_PLACE
+    CMP BOARD[SI], 0
+    JNE AI_SNX
+    MOV AL, SI
+    MOV AIMV,  AL
+    MOV AI_OK, 1
+    JMP AI_PLACE
+AI_SNX:
+    INC SI
+    JMP AI_SLP
+
+AI_PLACE:
+    CMP AI_OK, 0
+    JE  AI_DONE
+
+    MOV AL, AIMV
+    MOV AH, 0
+    MOV SI, AX
+    MOV BOARD[SI], 2
+    INC NMOVES
+    CALL DBOARD
+
+    ; Xoa thong bao
+    MOV AL, BSIZE
+    SHL AL, 1
+    ADD AL, BROW
+    ADD AL, 2
+    MOV DH, AL
+    MOV DL, 2
+    CALL GOXY
+    MOV CX, 40
+AICLR:
+    MOV BL, 017H
+    MOV DL, ' '
+    CALL PCH
+    LOOP AICLR
+
+AI_DONE:
+    RET
+DO_AI ENDP
+
+; ============================================================
+; PROC: FINDWIN
+; Tim o trong ma neu dat VPLR vao thi thang
+; Ket qua: AIMV = index, AI_OK = 1 neu tim thay
+; ============================================================
+FINDWIN PROC
+    MOV SI, 0
+FW_LP:
+    MOV AL, TCELLS
+    MOV AH, 0
+    CMP SI, AX
+    JAE FW_DONE
+
+    CMP BOARD[SI], 0
+    JNE FW_NX
+
+    ; Thu dat
+    MOV AL, VPLR
+    MOV BOARD[SI], AL
+
+    MOV AL, VPLR
+    CALL CHKWIN         ; ket qua AL
+    PUSH AX
+    MOV BOARD[SI], 0    ; hoan tac
+    POP AX
+
+    CMP AL, 0
+    JE  FW_NX
+    ; Tim duoc
+    MOV AL, SI
+    MOV AIMV,  AL
+    MOV AI_OK, 1
+    RET
+
+FW_NX:
+    INC SI
+    JMP FW_LP
+FW_DONE:
+    RET
+FINDWIN ENDP
+
+; ============================================================
+; PROC: CHKWIN
+; Input:  AL = player (1 hoac 2)
+; Output: AL = 1 neu thang, 0 neu chua
+; Dung bien VR, VC, VPLR (da duoc dat truoc)
+; ============================================================
+CHKWIN PROC
+    MOV VPLR, AL
+
+    MOV VR, 0
+CWR:
+    MOV AL, BSIZE
+    CMP VR, AL
+    JAE CW_NO
+
+    MOV VC, 0
+CWC:
+    MOV AL, BSIZE
+    CMP VC, AL
+    JAE CW_NROW
+
+    ; Index = VR * BSIZE + VC
+    MOV AL, VR
+    MUL BSIZE
+    ADD AL, VC
+    MOV AH, 0
+    MOV SI, AX
+
+    MOV AL, BOARD[SI]
+    CMP AL, VPLR
+    JNE CW_NCOL
+
+    ; Kiem tra 4 huong
+    MOV VDIR_R, 0
+    MOV VDIR_C, 1
+    CALL CHKDIR
+    CMP AL, 1
+    JE  CW_YES
+
+    MOV VDIR_R, 1
+    MOV VDIR_C, 0
+    CALL CHKDIR
+    CMP AL, 1
+    JE  CW_YES
+
+    MOV VDIR_R, 1
+    MOV VDIR_C, 1
+    CALL CHKDIR
+    CMP AL, 1
+    JE  CW_YES
+
+    ; Cheo nguoc: di xuong, sang trai
+    ; Dung: neu CL >= WLEN-1 thi moi co the di sang trai
+    MOV VDIR_R, 1
+    MOV VDIR_C, 255     ; -1 (mod 256), kiem tra bien trong CHKDIR
+    CALL CHKDIR
+    CMP AL, 1
+    JE  CW_YES
+
+CW_NCOL:
+    INC VC
+    JMP CWC
+
+CW_NROW:
+    INC VR
+    JMP CWR
+
+CW_NO:
+    MOV AL, 0
+    RET
+CW_YES:
+    MOV AL, 1
+    RET
+CHKWIN ENDP
+
+; ============================================================
+; PROC: CHKDIR
+; Kiem tra WLEN o lien tiep tu (VR,VC) theo huong (VDIR_R,VDIR_C)
+; Output: AL = 1 neu co du WLEN o cua VPLR
+; ============================================================
+CHKDIR PROC
+    MOV CL, 0           ; k = 0 (buoc di)
+    MOV CH, 0           ; dem = 0
+
+CD_LP:
+    MOV AL, WLEN
+    CMP CL, AL
+    JAE CD_CHECK
+
+    ; hang_moi = VR + k * VDIR_R
+    MOV AL, CL
+    MUL VDIR_R          ; AX = k * VDIR_R
+    ADD AL, VR
+    ; Neu VDIR_R = 0 thi AH = 0, AL = VR (OK)
+    ; Neu VDIR_R = 1 thi AH = 0, AL = VR + k
+    ; AH tu MUL byte luon = 0 vi k,VDIR_R < 256
+    MOV CD_HR, AL       ; luu hang moi
+
+    CMP AL, BSIZE       ; hang >= BSIZE?
+    JAE CD_FAIL
+
+    ; cot_moi = VC + k * VDIR_C
+    MOV AL, CL
+    MUL VDIR_C          ; AX = k * VDIR_C
+    ; Neu VDIR_C = 255 (-1): AL = (255*k) mod 256
+    ; Vi du k=1: AL=255, VC=0 -> 255+0=255 >= BSIZE -> FAIL (dung)
+    ; Vi du k=1: AL=255, VC=2 -> 255+2=1 (overflow byte) -> < BSIZE (sai)
+    ; => Can kiem tra rieng truong hop VDIR_C = 255
+    ADD AL, VC
+    MOV CD_HC, AL       ; luu cot moi
+
+    ; Kiem tra bien cot
+    CMP AL, BSIZE       ; cot >= BSIZE (unsigned)?
+    JAE CD_FAIL
+
+    ; Index = hang_moi * BSIZE + cot_moi
+    MOV AL, CD_HR
+    MUL BSIZE
+    ADD AL, CD_HC
+    MOV AH, 0
+    MOV SI, AX
+
+    MOV AL, BOARD[SI]
+    CMP AL, VPLR
+    JNE CD_FAIL
+
+    INC CH
+    INC CL
+    JMP CD_LP
+
+CD_CHECK:
+    MOV AL, CH
+    CMP AL, WLEN
+    JNE CD_FAIL
+    MOV AL, 1
+    RET
+CD_FAIL:
+    MOV AL, 0
+    RET
+CHKDIR ENDP
+
+; ============================================================
+; PROC: SHOW_WIN - In thong bao thang
+; ============================================================
+SHOW_WIN PROC
+    MOV AL, BSIZE
+    SHL AL, 1
+    ADD AL, BROW
+    ADD AL, 2
+    MOV DH, AL
+    MOV DL, 2
+    CALL GOXY
+    MOV BL, 02EH        ; Vang tren xanh la
+
+    MOV AL, WINNER
+    CMP AL, 1
+    JNE SW_O
+    LEA DX, S_WX
+    CALL PCOL
+    INC SCX
+    RET
+SW_O:
+    CMP GMODE, 1
+    JNE SW_O2
+    LEA DX, S_WAI
+    CALL PCOL
+    INC SCO
+    RET
+SW_O2:
+    LEA DX, S_WO
+    CALL PCOL
+    INC SCO
+    RET
+SHOW_WIN ENDP
+
+; ============================================================
+; PROC: SHOW_DRAW - In thong bao hoa
+; ============================================================
+SHOW_DRAW PROC
+    MOV AL, BSIZE
+    SHL AL, 1
+    ADD AL, BROW
+    ADD AL, 2
+    MOV DH, AL
+    MOV DL, 2
+    CALL GOXY
+    MOV BL, 01EH
+    LEA DX, S_DRAW
+    CALL PCOL
+    INC SCD
+    RET
+SHOW_DRAW ENDP
+
+; ============================================================
+; PROC: DSCORE - Hien thi diem so
+; ============================================================
+DSCORE PROC
+    MOV DH, 2
+    MOV DL, 42
+    CALL GOXY
+    MOV BL, 01FH
+    LEA DX, S_SC1
+    CALL PCOL
+
+    MOV BL, 01EH
+    MOV AL, SCX
+    ADD AL, '0'
+    MOV DL, AL
+    CALL PCH
+
+    MOV BL, 01FH
+    LEA DX, S_SC2
+    CALL PCOL
+
+    MOV BL, 01CH
+    MOV AL, SCO
+    ADD AL, '0'
+    MOV DL, AL
+    CALL PCH
+
+    MOV BL, 01FH
+    LEA DX, S_SC3
+    CALL PCOL
+
+    MOV BL, 01BH
+    MOV AL, SCD
+    ADD AL, '0'
+    MOV DL, AL
+    CALL PCH
+    RET
+DSCORE ENDP
+
+; ============================================================
+; PROC: DGUIDE - In huong dan ngan o dong cuoi
+; ============================================================
+DGUIDE PROC
+    MOV DH, 24
+    MOV DL, 0
+    CALL GOXY
+    MOV BL, 01BH
+    LEA DX, S_GD
+    CALL PCOL
+    RET
+DGUIDE ENDP
+
+; ============================================================
+; PROC: PRTHDR - In tieu de 4 dong dau
+; ============================================================
+PRTHDR PROC
+    MOV DH, 0
+    MOV DL, 0
+    CALL GOXY
+    MOV BL, 01FH
+    LEA DX, S_LINE
+    CALL PCOL
+
+    MOV DH, 1
+    MOV DL, 0
+    CALL GOXY
+    LEA DX, S_T1
+    CALL PCOL
+
+    MOV DH, 2
+    MOV DL, 0
+    CALL GOXY
+    LEA DX, S_T2
+    CALL PCOL
+
+    MOV DH, 3
+    MOV DL, 0
+    CALL GOXY
+    LEA DX, S_LINE
+    CALL PCOL
+    RET
+PRTHDR ENDP
+
+; ============================================================
+; PROC: SETBG - To nen xanh dam toan man hinh
+; ============================================================
+SETBG PROC
+    MOV AX, 0600H
+    MOV BH, 017H
+    MOV CX, 0000H
+    MOV DX, 184FH
+    INT 10H
+    RET
+SETBG ENDP
+
+; ============================================================
+; PROC: CLR - Xoa man hinh
+; ============================================================
+CLR PROC
+    MOV AH, 00H
+    MOV AL, 03H
+    INT 10H
+    RET
+CLR ENDP
+
+; ============================================================
+; PROC: GOXY - Di chuyen con tro (DH=dong, DL=cot)
+; ============================================================
+GOXY PROC
+    MOV AH, 02H
+    MOV BH, 00H
+    INT 10H
+    RET
+GOXY ENDP
+
+; ============================================================
+; PROC: PCOL - In chuoi co mau BL (chuoi ket thuc bang '$')
+; Input: DX = dia chi chuoi, BL = mau (color attribute)
+; ============================================================
+PCOL PROC
+    PUSH SI
+    PUSH AX
+    PUSH BX
+    PUSH CX
+    PUSH DX
+    MOV SI, DX
+    MOV BH, 0
+PCOL_L:
+    MOV AL, [SI]
+    CMP AL, '$'
+    JE  PCOL_D
+    MOV AH, 09H
+    MOV CX, 1
+    INT 10H
+    ; Dich con tro sang phai 1 o
+    MOV AH, 03H
+    INT 10H
+    INC DL
+    MOV AH, 02H
+    INT 10H
+    INC SI
+    JMP PCOL_L
+PCOL_D:
+    POP DX
+    POP CX
+    POP BX
+    POP AX
+    POP SI
+    RET
+PCOL ENDP
+
+; ============================================================
+; PROC: PCH - In 1 ky tu co mau
+; Input: DL = ky tu, BL = mau
+; ============================================================
+PCH PROC
+    PUSH AX
+    PUSH BX
+    PUSH CX
+    PUSH DX
+    MOV BH, 0
+    MOV AH, 09H
+    MOV AL, DL
+    MOV CX, 1
+    INT 10H
+    MOV AH, 03H
+    INT 10H
+    INC DL
+    MOV AH, 02H
+    INT 10H
+    POP DX
+    POP CX
+    POP BX
+    POP AX
+    RET
+PCH ENDP
+
+; ============================================================
+END
